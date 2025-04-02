@@ -458,9 +458,13 @@ wheels = [
 [[package]]
 name = "mersal"
 version = "0.1.0"
-source = { git = "ssh://git@github.com/mersal-org/mersal.git?rev=main#1f575caf679ac2fcdf040c50a71da4b4347c8e17" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e5/87/c55815de9da7408634a48c9c63e104ddac40a1c4bc2437298bb6b7e8f224/mersal-0.1.0.tar.gz", hash = "sha256:1a3b193e5b234f27a9569bc2089fd741e20e047fb9d28f62c5bf90628ef9ca25", size = 251009 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/68/7e/d207b328b2d44c804dc9ca08962e435479a6f53961959c087dcd509ad8c8/mersal-0.1.0-py3-none-any.whl", hash = "sha256:9a148108f020880bcb1252c8294720f879c76031f4c4ea26bdc9c5c507bb810b", size = 101383 },
 ]
 
 [[package]]
@@ -519,7 +523,7 @@ test = [
 requires-dist = [
     { name = "aio-pika" },
     { name = "anyio", specifier = ">=4.8.0" },
-    { name = "mersal", git = "ssh://git@github.com/mersal-org/mersal.git?rev=main" },
+    { name = "mersal" },
 ]
 
 [package.metadata.requires-dev]
