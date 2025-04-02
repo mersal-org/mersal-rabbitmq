@@ -6,7 +6,7 @@ authors = [
     { name = "Abdulhaq Emhemmed", email = "abdulhaq.emhemmed@gmail.com" }
 ]
 dependencies = [
-    "mersal",
+    "mersal @ https://github.com/mersal-org/mersal.git",
     "aio-pika",
     "anyio>=4.8.0",
 ]
