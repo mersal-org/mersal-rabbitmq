@@ -29,6 +29,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # hatch-vcs needs the full history/tags to compute the version
 
       - name: Free additional space
         run: |
@@ -46,19 +48,25 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ inputs.python-version }}
 
-      - name: Set up Python
-        run: uv python install ${{ inputs.python-version }}
+      - name: Install mise
+        uses: jdx/mise-action@v2
+        with:
+          install: false
+          cache: true
+          experimental: true
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev --all-packages
+        run: mise run install
 
       - name: Set PYTHONPATH
         run: echo "PYTHONPATH=$PWD" >> $GITHUB_ENV
 
       - name: Test
         if: ${{ !inputs.coverage }}
-        run: uv run make test
+        run: mise run test
 
       # - name: Test with coverage
       #   if: ${{ inputs.coverage }}
