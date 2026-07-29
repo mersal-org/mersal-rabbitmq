@@ -45,7 +45,7 @@ Mersal-RabbitMQ
 **mersal_rabbitmq** is the RabbitMQ implementation for Mersal. It allows using RabbitMQ as a transport that also supports Mersal pub/sub.
 
 
- Read the docs `here <mersal-rabbitmq.mersal.dev>`_
+ Read the docs `here <https://mersal-rabbitmq.mersal.dev>`_
 
 
 Acknowledgments
