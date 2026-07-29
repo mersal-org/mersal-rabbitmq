@@ -9,7 +9,7 @@ from __future__ import annotations
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "mersal-rabbitmq"
-copyright = "2025, Abdulhaq Emhemmed"  # noqa: A001
+copyright = "2025, Abdulhaq Emhemmed"
 author = "Abdulhaq Emhemmed"
 release = "0.1"
 

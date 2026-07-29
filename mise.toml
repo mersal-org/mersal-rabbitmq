@@ -163,6 +163,7 @@ echo "{{vars.OK}} Basedpyright checks passed ✨"
 quiet = true
 description = "Type check"
 run = [
+    "{{mise_bin}} run type-check:ty",
     "{{mise_bin}} run type-check:mypy",
     "{{mise_bin}} run type-check:pyright",
 ]
