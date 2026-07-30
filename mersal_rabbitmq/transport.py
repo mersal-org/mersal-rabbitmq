@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-from collections import deque
-from contextlib import suppress
+import math
+from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -12,15 +12,16 @@ from typing import TYPE_CHECKING, Any
 import aio_pika
 import aio_pika.abc
 import anyio
+import anyio.abc
 
 from mersal.logging import Logger, NullLogger
 from mersal.messages import TransportMessage
 from mersal.messages.message_headers import MessageHeaders
 from mersal.threading import AnyIOPeriodicTaskFactory, PeriodicAsyncTask, PeriodicAsyncTaskFactory
 from mersal.transport.base_transport import BaseTransport
-from mersal.utils import AsyncRetrier
 
 if TYPE_CHECKING:
+    from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
     from pamqp import common as pamqp_common
 
     from mersal.transport import TransactionContext
@@ -33,7 +34,7 @@ __all__ = (
 )
 
 
-_RETRY_DELAYS = [0.0, 0.0]
+_RETRY_DELAYS = [0.1, 0.5, 2.0]
 
 # Types pamqp encodes natively into an AMQP field table. Everything else is
 # stringified as a last resort (see `_to_header_value`).
@@ -84,6 +85,15 @@ class RabbitMqTransportConfig:
     consumer at once. Sized a few times larger than the app's expected processing
     concurrency (see `max_parallelism` on the worker) keeps the pipeline fed without
     letting one slow consumer hoard the whole queue.
+
+    Also size this against processing time, not just parallelism: RabbitMQ (3.8.15+)
+    forcibly closes a channel whose oldest unacked delivery exceeds `consumer_timeout`
+    (broker-side setting, default 30 minutes) - and a message can sit unacked in
+    `_Consumer.receive_stream` (this transport's local prefetch buffer, ahead of the app
+    actually processing it) for a while under a large `prefetch_count` and slow
+    handlers. Hitting the timeout kills the consume channel; the transport self-heals
+    it (see `receive`), but every message still in flight at that point gets
+    redelivered.
     """
     passive_queue_check_interval: float | None = 60.0
     """How often, in seconds, to passively verify the input queue still exists on the
@@ -99,31 +109,20 @@ class RabbitMqTransportConfig:
 
 @dataclass
 class _Consumer:
-    """A live consumer subscription plus the local buffer it feeds.
-
-    `pump_task` drains the aio-pika queue iterator into `buffer` so that `receive`
-    never awaits (and therefore never cancels) the iterator's `__anext__` directly:
-    aio-pika interprets cancellation of `__anext__` as a shutdown request and responds
-    by closing the whole consumer. Waiting on our own buffer instead makes `receive`
-    safe to cancel from outside (worker shutdown, or a caller-imposed deadline): the
-    subscription and any prefetched messages are untouched.
-    """
+    """A live consumer subscription plus the memory object stream it feeds."""
 
     iterator: aio_pika.abc.AbstractQueueIterator
-    pump_task: asyncio.Task[None] | None = None
-    buffer: deque[aio_pika.abc.AbstractIncomingMessage] = field(default_factory=deque)
-    message_available: anyio.Event = field(default_factory=anyio.Event)
-    dead: bool = False
+    send_stream: MemoryObjectSendStream[aio_pika.abc.AbstractIncomingMessage]
+    receive_stream: MemoryObjectReceiveStream[aio_pika.abc.AbstractIncomingMessage]
+    cancel_scope: anyio.CancelScope = field(default_factory=anyio.CancelScope)
+    pump_done: anyio.Event = field(default_factory=anyio.Event)
 
 
 @dataclass
 class _StartedState:
     """Everything that only exists once the transport has connected.
 
-    Grouping these means the started/not-started invariant lives in one
-    `_StartedState | None` field instead of one Optional per resource, and
-    `_ensure_started` can hand back a fully-typed state with no unwrapping at
-    every use site.
+    `_ensure_started` hands back this fully-typed state.
     """
 
     connection: aio_pika.abc.AbstractRobustConnection
@@ -133,6 +132,8 @@ class _StartedState:
     topic_exchange: aio_pika.abc.AbstractExchange
     input_queue: aio_pika.abc.AbstractQueue
     consumer: _Consumer
+    pump_task_group: anyio.abc.TaskGroup
+    pump_exit_stack: AsyncExitStack
 
 
 class RabbitMqTransport(BaseTransport):
@@ -143,6 +144,14 @@ class RabbitMqTransport(BaseTransport):
         point-to-point sends (each app's input queue is bound to it with a routing key
         equal to its own address), and a ``topic`` exchange used for pub/sub (see
         `mersal_rabbitmq.subscription_storage.RabbitMqSubscriptionStorage`).
+
+    Backend:
+        Anyio-native, including the consumer pump: `_pump` runs in a long-lived task
+        group (`_StartedState.pump_task_group`) that outlives any single `receive`
+        call, with a per-consumer `anyio.CancelScope` (see `_Consumer`) used to cancel
+        just one consumer's pump - e.g. on self-heal - without tearing down the group
+        itself. `send_outgoing_messages` fires concurrent publishes via an anyio task
+        group too.
 
     Connections and channels:
         A single `aio_pika.connect_robust` connection is opened once and reused for the
@@ -167,7 +176,10 @@ class RabbitMqTransport(BaseTransport):
         transparently recovered) is noticed reactively, the next time `receive` is
         called. A vanished *queue* (e.g. deleted by a TTL/`x-expires` policy) is
         noticed proactively instead, by a periodic passive-existence check - see
-        `RabbitMqTransportConfig.passive_queue_check_interval`.
+        `RabbitMqTransportConfig.passive_queue_check_interval`. Recreating a vanished
+        queue only restores its direct-exchange binding; the `queue_recreated_hook`
+        property lets a subscription storage re-establish topic-exchange bindings too
+        (see `RabbitMQPlugin`).
     """
 
     def __init__(
@@ -216,14 +228,42 @@ class RabbitMqTransport(BaseTransport):
         )
 
         self._exchange_cache: dict[str, aio_pika.abc.AbstractExchange] = {}
-        self._retrier = AsyncRetrier(_RETRY_DELAYS)
 
         self._state: _StartedState | None = None
         self._start_lock = anyio.Lock()
         self._consumer_lock = anyio.Lock()
+        self._on_queue_recreated: Callable[[str], Awaitable[None]] | None = None
 
     async def __call__(self) -> None:
         await self._ensure_started()
+
+    @property
+    def queue_recreated_hook(self) -> Callable[[str], Awaitable[None]] | None:
+        """Callback invoked with `self.address` whenever the passive queue check
+        finds the input queue gone and recreates it.
+
+        Recreating the queue only restores its direct-exchange binding (see
+        `_declare_and_bind`) - any topic-exchange bindings it had (i.e. this app's
+        subscriptions) are gone with the deleted queue. `RabbitMQPlugin` wires this to
+        `RabbitMqSubscriptionStorage.rebind_subscriptions` so those get re-established
+        too.
+        """
+        return self._on_queue_recreated
+
+    @queue_recreated_hook.setter
+    def queue_recreated_hook(self, hook: Callable[[str], Awaitable[None]] | None) -> None:
+        self._on_queue_recreated = hook
+
+    async def ensure_connection(self) -> aio_pika.abc.AbstractRobustConnection:
+        """Return the transport's underlying connection, connecting first if necessary.
+
+        Lets other RabbitMQ-backed components sharing this broker (e.g.
+        `RabbitMqSubscriptionStorage`) reuse this connection instead of opening one of
+        their own - one fewer TCP connection and reconnect state machine against the
+        broker.
+        """
+        state = await self._ensure_started()
+        return state.connection
 
     async def close(self) -> None:
         """Gracefully tear down the consumer and connection.
@@ -239,6 +279,8 @@ class RabbitMqTransport(BaseTransport):
         self._exchange_cache.clear()
         if state is not None:
             await self._close_consumer(state.consumer)
+            state.pump_task_group.cancel_scope.cancel()
+            await state.pump_exit_stack.aclose()
             await state.connection.close()
 
     async def create_queue(self, address: str) -> None:
@@ -253,23 +295,24 @@ class RabbitMqTransport(BaseTransport):
     ) -> None:
         state = await self._ensure_started()
 
-        for message in outgoing_message:
+        async def _publish(message: OutgoingMessage) -> None:
             exchange, routing_key, mandatory = await self._resolve_publish_target(state, message.destination_address)
             amqp_message = self._to_amqp_message(message.transport_message)
-            await self._retrier.run(partial(exchange.publish, amqp_message, routing_key, mandatory=mandatory))
+            await self._retry(partial(exchange.publish, amqp_message, routing_key, mandatory=mandatory))
+
+        async with anyio.create_task_group() as task_group:
+            for message in outgoing_message:
+                task_group.start_soon(_publish, message)
 
     async def receive(self, transaction_context: TransactionContext) -> TransportMessage | None:
-        """Wait for the next message; blocks until one arrives.
-
-        There is deliberately no built-in timeout: the worker stops a blocked receive
-        by cancelling it, and any caller needing a deadline can impose one externally
-        (e.g. `anyio.move_on_after`) - the wait is cancellation-safe and leaves the
-        underlying consumer untouched.
-        """
+        """Wait for the next message; blocks until one arrives."""
         state = await self._ensure_started()
         consumer = state.consumer
 
-        incoming_message = await self._next_message(consumer)
+        try:
+            incoming_message = await consumer.receive_stream.receive()
+        except anyio.EndOfStream:
+            incoming_message = None
 
         if incoming_message is None:
             # The consumer was torn down (e.g. the channel closed and wasn't - or
@@ -281,52 +324,61 @@ class RabbitMqTransport(BaseTransport):
                 if self._state is state and state.consumer is consumer:
                     self._logger.warning("rabbitmq.consumer.reinitializing", address=self.address)
                     await self._close_consumer(consumer)
-                    state.consumer = await self._create_consumer(state.input_queue)
+                    state.consumer = await self._create_consumer(state.input_queue, state.pump_task_group)
             return None
 
+        # A message delivered before a connection drop is bound to that dead
+        # connection's channel; ack/nack against it raises `ChannelInvalidStateError`
+        # on every attempt, including retries - `_retry` treats that as a retryable
+        # broker hiccup, but this particular failure can't be fixed by waiting, only by
+        # a fresh redelivery on the new channel (which the broker sends on its own, per
+        # normal at-least-once semantics). Expected log noise, not a bug.
         async def on_ack(_: TransactionContext) -> None:
-            await self._retrier.run(incoming_message.ack)
+            await self._retry(incoming_message.ack)
 
         async def on_nack(_: TransactionContext) -> None:
-            await self._retrier.run(partial(incoming_message.nack, requeue=True))
+            await self._retry(partial(incoming_message.nack, requeue=True))
 
         transaction_context.on_ack(on_ack)
         transaction_context.on_nack(on_nack)
 
         return self._to_transport_message(incoming_message)
 
-    async def _next_message(self, consumer: _Consumer) -> aio_pika.abc.AbstractIncomingMessage | None:
-        """Wait for the next buffered message; `None` means the consumer is dead.
+    async def _retry(self, func: Callable[[], Awaitable[Any]]) -> None:
+        """Retry `func` with backoff."""
+        for delay in (*_RETRY_DELAYS, None):
+            try:
+                await func()
+                return
+            except BaseException:
+                if delay is None:
+                    raise
+                await anyio.sleep(delay)
 
-        Cancellation-safe by construction: a message is only ever taken out of the
-        buffer synchronously after a wait completes, so cancelling the wait (worker
-        shutdown, or a deadline imposed by the caller) can never drop one.
-        """
-        while True:
-            if consumer.buffer:
-                return consumer.buffer.popleft()
-            if consumer.dead:
-                return None
-            event = consumer.message_available
-            if event.is_set():
-                # Stale from an earlier delivery whose message was already taken;
-                # arm a fresh event, then re-check the buffer before waiting.
-                consumer.message_available = anyio.Event()
-                continue
-            await event.wait()
-
-    async def _create_consumer(self, input_queue: aio_pika.abc.AbstractQueue) -> _Consumer:
+    async def _create_consumer(
+        self, input_queue: aio_pika.abc.AbstractQueue, pump_task_group: anyio.abc.TaskGroup
+    ) -> _Consumer:
         iterator = input_queue.iterator()
         await iterator.consume()
-        consumer = _Consumer(iterator=iterator)
-        consumer.pump_task = asyncio.create_task(self._pump(consumer))
+        send_stream: MemoryObjectSendStream[aio_pika.abc.AbstractIncomingMessage]
+        receive_stream: MemoryObjectReceiveStream[aio_pika.abc.AbstractIncomingMessage]
+
+        send_stream, receive_stream = anyio.create_memory_object_stream(max_buffer_size=math.inf)
+        consumer = _Consumer(iterator=iterator, send_stream=send_stream, receive_stream=receive_stream)
+        _ = pump_task_group.start_soon(self._run_pump, consumer)
         return consumer
+
+    async def _run_pump(self, consumer: _Consumer) -> None:
+        try:
+            with consumer.cancel_scope:
+                await self._pump(consumer)
+        finally:
+            consumer.pump_done.set()
 
     async def _pump(self, consumer: _Consumer) -> None:
         try:
             async for message in consumer.iterator:
-                consumer.buffer.append(message)
-                consumer.message_available.set()
+                consumer.send_stream.send_nowait(message)
         except (aio_pika.exceptions.AMQPError, aio_pika.exceptions.ChannelInvalidStateError) as exc:
             # A dying channel/connection is an ordinary way for a consumer to end -
             # the self-heal in `receive` deals with it, so no stack trace needed.
@@ -336,34 +388,34 @@ class RabbitMqTransport(BaseTransport):
         finally:
             # Reached on iterator exhaustion (consumer closed / connection gone),
             # crash, or cancellation - all of which mean "this consumer is done".
-            consumer.dead = True
-            consumer.message_available.set()
+            # Closing the send end turns the next (or a currently pending)
+            # `receive_stream.receive()` into `EndOfStream`, once anything already
+            # buffered is drained.
+            consumer.send_stream.close()
 
     async def _close_consumer(self, consumer: _Consumer) -> None:
         with suppress(Exception):
             await consumer.iterator.close()
-        if consumer.pump_task is not None:
-            consumer.pump_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await consumer.pump_task
-        # Requeue anything still sitting in the local buffer so it's redelivered
-        # promptly instead of dangling unacked until the channel dies. Best-effort:
-        # if the channel is already gone, the broker requeues these by itself.
-        while consumer.buffer:
-            message = consumer.buffer.popleft()
+        consumer.cancel_scope.cancel()
+        await consumer.pump_done.wait()
+        # Requeue anything still sitting in the stream so it's redelivered promptly
+        # instead of dangling unacked until the channel dies. Best-effort: if the
+        # channel is already gone, the broker requeues these by itself.
+        while True:
+            try:
+                message = consumer.receive_stream.receive_nowait()
+            except (anyio.WouldBlock, anyio.EndOfStream):
+                break
             with suppress(Exception):
                 await message.nack(requeue=True)
+        consumer.receive_stream.close()
 
     async def _ensure_started(self) -> _StartedState:
         if self._state is not None:
             return self._state
         async with self._start_lock:
-            if self._state is not None:
-                # Another task finished starting while we waited on the lock; mypy's
-                # narrowing from the fast-path check above can't see that.
-                return self._state  # type: ignore[unreachable]
-
             connection = await aio_pika.connect_robust(self._connection_uri)
+            pump_exit_stack = AsyncExitStack()
             try:
                 await self._declare_and_bind(connection, self.address)
 
@@ -374,11 +426,15 @@ class RabbitMqTransport(BaseTransport):
                 consume_channel = await connection.channel()
                 await consume_channel.set_qos(prefetch_count=self._prefetch_count)
                 input_queue = await consume_channel.get_queue(self.address, ensure=True)
-                consumer = await self._create_consumer(input_queue)
+
+                pump_task_group = await pump_exit_stack.enter_async_context(anyio.create_task_group())
+                consumer = await self._create_consumer(input_queue, pump_task_group)
             except BaseException:
                 # A partial start (e.g. a PRECONDITION_FAILED on redeclare) must not
-                # leak the connection; shielded so cancellation can't abandon it either.
+                # leak the connection or the pump task group; shielded so cancellation
+                # can't abandon them either.
                 with anyio.CancelScope(shield=True):
+                    await pump_exit_stack.aclose()
                     await connection.close()
                 raise
 
@@ -393,6 +449,8 @@ class RabbitMqTransport(BaseTransport):
                 topic_exchange=topic_exchange,
                 input_queue=input_queue,
                 consumer=consumer,
+                pump_task_group=pump_task_group,
+                pump_exit_stack=pump_exit_stack,
             )
             return self._state
 
@@ -413,10 +471,12 @@ class RabbitMqTransport(BaseTransport):
         except aio_pika.exceptions.ChannelClosed:
             self._logger.warning("rabbitmq.queue.missing", address=self.address)
             await self._declare_and_bind(state.connection, self.address)
+            if self._on_queue_recreated is not None:
+                await self._on_queue_recreated(self.address)
             async with self._consumer_lock:
                 if self._state is state:
                     await self._close_consumer(state.consumer)
-                    state.consumer = await self._create_consumer(state.input_queue)
+                    state.consumer = await self._create_consumer(state.input_queue, state.pump_task_group)
         finally:
             if not channel.is_closed:
                 await channel.close()
@@ -511,6 +571,13 @@ class RabbitMqTransport(BaseTransport):
             delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             message_id=str(message_id) if message_id is not None else None,
             correlation_id=str(correlation_id) if correlation_id is not None else None,
+            # Mersal doesn't track a serialization format, so this only claims the
+            # body is opaque bytes (true regardless of serializer) - still useful to
+            # interop tooling (management UI, shovels, other consumers) that would
+            # otherwise have to guess. `timestamp` likewise costs nothing and is
+            # commonly surfaced by the same tooling.
+            content_type="application/octet-stream",
+            timestamp=datetime.now(UTC),
         )
 
     def _to_transport_message(self, message: aio_pika.abc.AbstractIncomingMessage) -> TransportMessage:

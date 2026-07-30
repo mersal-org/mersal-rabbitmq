@@ -71,17 +71,20 @@ class TestRabbitMQSubscriptionStorage(BasicSubscriptionStorageTest):
         queue_name = f"subscriber-{uuid.uuid4()}"
 
         try:
-            await subject1.register_subscriber(topic, queue_name)
-
-            magic_address = f"{topic}@{topic_exchange_name}"
-            assert await subject1.get_subscriber_addresses(topic) == {magic_address}
-            assert await subject2.get_subscriber_addresses(topic) == {magic_address}
-
             connection = await aio_pika.connect_robust(connection_uri)
             async with connection:
                 channel = await connection.channel()
                 exchange = await channel.get_exchange(topic_exchange_name, ensure=True)
-                queue = await channel.get_queue(queue_name, ensure=True)
+                # `register_subscriber` no longer declares the queue itself - it
+                # expects the subscriber's own transport to have already done so at
+                # its startup - so this stands in for that transport here.
+                queue = await channel.declare_queue(queue_name, durable=True)
+
+                await subject1.register_subscriber(topic, queue_name)
+
+                magic_address = f"{topic}@{topic_exchange_name}"
+                assert await subject1.get_subscriber_addresses(topic) == {magic_address}
+                assert await subject2.get_subscriber_addresses(topic) == {magic_address}
 
                 await exchange.publish(aio_pika.Message(body=b"hello"), routing_key=topic)
                 message = await queue.get(fail=False, timeout=2)
@@ -104,6 +107,7 @@ class TestRabbitMQSubscriptionStorage(BasicSubscriptionStorageTest):
     async def test_register_and_unregister_are_idempotent(
         self,
         centralized_storage_maker: SubscriptionStorageMaker,
+        connection_uri: str,
         delete_queues: Callable[..., Awaitable[None]],
     ) -> None:
         """Registering/unregistering twice mirrors plain AMQP `queue.bind`/`unbind`
@@ -115,6 +119,13 @@ class TestRabbitMQSubscriptionStorage(BasicSubscriptionStorageTest):
         queue_name = f"subscriber-{uuid.uuid4()}"
 
         try:
+            # `register_subscriber` expects the subscriber's own transport to have
+            # already declared its queue at startup - stand in for that here.
+            connection = await aio_pika.connect_robust(connection_uri)
+            async with connection:
+                channel = await connection.channel()
+                await channel.declare_queue(queue_name, durable=True)
+
             await subject.register_subscriber(topic, queue_name)
             await subject.register_subscriber(topic, queue_name)
 

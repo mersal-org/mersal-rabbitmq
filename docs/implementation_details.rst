@@ -49,11 +49,13 @@ push-pull bridge.
 
 In this bridge, the Mersal worker `receive` API (which runs in an infinite loop)
 is not allowed to return `None` when there are no messages. It awaits messages
-being placed in a local buffer. This local buffer is filled by iterating over
-messages using :code:`async for message in queue.iterator`.
+being placed on a local hand-off: an `anyio` memory object stream. This stream is
+fed by a pump task that iterates over messages using :code:`async for message in
+queue.iterator`.
 
-So in short, we run an async task to consume the pushed messages and store them
-in a buffer then the pull api running in another task consumes this buffer.
+So in short, we run an async task (the "pump") to consume the pushed messages and
+push them onto the stream; the pull API, running as part of `receive`, then just
+awaits the receiving end of that same stream.
 
 
 Missing features
@@ -61,4 +63,3 @@ Missing features
 
 1. Message expiry: tracked in `<https://github.com/mersal-org/mersal-rabbitmq/issues/1>`_
 2. Deferred messages: tracked in `<https://github.com/mersal-org/mersal-rabbitmq/issues/2>`_
-3. Replaying subscriptions if a queue is recreated.

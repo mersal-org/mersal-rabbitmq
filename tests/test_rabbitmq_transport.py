@@ -133,8 +133,9 @@ class TestRabbitMQTransportSpecificBehaviour:
         async def _send(context: DefaultTransactionContext) -> None:
             await sender.send("this-destination-was-never-created", message, context)
 
-        with pytest.raises(aio_pika.exceptions.DeliveryError):
+        with pytest.raises(BaseExceptionGroup) as exc_info:
             await self.assert_with_context(_send)
+        assert isinstance(exc_info.value.exceptions[0], aio_pika.exceptions.PublishError)
 
     async def test_custom_headers_round_trip(self, transport_maker: TransportMaker) -> None:
         sender = transport_maker(input_queue_address="header-sender")

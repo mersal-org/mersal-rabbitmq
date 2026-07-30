@@ -205,6 +205,12 @@ async def rabbitmq_transport_maker(
     """
     created_addresses: set[str] = set()
     created_transports: list[RabbitMqTransport] = []
+    started_transports: list[RabbitMqTransport] = []
+    """Every transport that has actually called `_ensure_started`, in the order it
+    first did so - which is when its `pump_task_group` was entered on this fixture's
+    task (see the teardown loop below for why that order, not construction order,
+    is what matters).
+    """
 
     def maker(**kwargs: Any) -> Transport:
         address = kwargs.pop("input_queue_address")
@@ -223,12 +229,34 @@ async def rabbitmq_transport_maker(
         )
         transport = RabbitMqTransport(config=config, logger=NullLogger())
         created_transports.append(transport)
+
+        # `_ensure_started` is lazy and idempotent - tests trigger it in whatever
+        # order suits the scenario (e.g. starting a "receiver" before ever touching
+        # a "sender" constructed earlier), which need not match construction order.
+        # Wrapping it here records the true order transports' pump task groups were
+        # entered in, so teardown can close them in exact reverse of that.
+        original_ensure_started = transport._ensure_started
+
+        async def _ensure_started_tracked() -> Any:
+            if transport not in started_transports:
+                started_transports.append(transport)
+            return await original_ensure_started()
+
+        transport._ensure_started = _ensure_started_tracked  # type: ignore[method-assign]
         return transport
 
     yield maker
 
     # Close transports before the event loop goes away - a still-live consumer's
-    # background pump would otherwise be cancelled abruptly at loop teardown.
-    for transport in created_transports:
+    # background pump would otherwise be cancelled abruptly at loop teardown. Reverse
+    # *start* order matters: `_ensure_started` opens each transport's `pump_task_group`
+    # in this same task, so every task group it opens nests its cancel scope inside
+    # whichever one is currently innermost on that task's stack - closing them out of
+    # that order would try to exit an outer scope while an inner one is still open,
+    # which anyio rejects. Any transport never started has no task group to worry about.
+    for transport in reversed(started_transports):
         await transport.close()
+    for transport in created_transports:
+        if transport not in started_transports:
+            await transport.close()
     await delete_queues(*created_addresses)

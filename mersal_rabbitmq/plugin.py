@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mersal.lifespan.lifespan_hooks_registration_plugin import LifespanHooksRegistrationPluginConfig
 from mersal.logging import Logger
@@ -53,12 +53,6 @@ class RabbitMQPluginConfig:
     consuming from or publishing to wouldn't otherwise be noticed missing until
     something tried to use it again. Set to `None` to disable the check entirely.
     """
-    subscriber_queue_durable: bool = True
-    """Durability used when defensively declaring a subscriber's queue before binding
-    it. Should match the durability the subscriber's own `RabbitMqTransport` declares
-    its input queue with, or RabbitMQ will reject the (re)declaration with a
-    channel-closing PRECONDITION_FAILED error.
-    """
 
     def plugin(self) -> RabbitMQPlugin:
         return RabbitMQPlugin(self)
@@ -79,6 +73,7 @@ class RabbitMQPlugin(Plugin):
                 input_queue_name=self._config.input_queue_name,
                 should_declare_exchanges=self._config.should_declare_exchanges,
                 should_declare_input_queue=self._config.should_declare_input_queue,
+                should_bind_input_queue=self._config.should_bind_input_queue,
                 direct_exchange_arguments=self._config.direct_exchange_arguments,
                 topic_exchange_arguments=self._config.topic_exchange_arguments,
                 direct_exchange_name=self._config.direct_exchange_name,
@@ -97,24 +92,35 @@ class RabbitMQPlugin(Plugin):
         def register_subscription_configuration(
             configurator: StandardConfigurator,
         ) -> RabbitMqSubscriptionStorage:
+            # Sharing the transport's connection (rather than opening a second one to
+            # the same broker) also lets us wire `rebind_subscriptions` as the
+            # transport's queue-recreation hook, since both ends of that hand-off need
+            # to agree on the same underlying queue/broker state.
+            # `register_transport` is this plugin's own factory for `Transport`, so
+            # the instance it returns is always a `RabbitMqTransport`.
+            transport = cast("RabbitMqTransport", configurator.get(Transport))  # type: ignore[type-abstract]
             subscription_config = RabbitMqSubscriptionStorageConfig(
                 connection_uri=self._config.connection_uri,
                 topic_exchange_name=self._config.topic_exchange_name,
                 should_declare_topic_exchange=self._config.should_declare_exchanges,
                 topic_exchange_arguments=self._config.topic_exchange_arguments,
-                subscriber_queue_durable=self._config.subscriber_queue_durable,
             )
-            return RabbitMqSubscriptionStorage(
+            storage = RabbitMqSubscriptionStorage(
                 config=subscription_config,
+                connection_provider=transport.ensure_connection,
             )
+            transport.queue_recreated_hook = storage.rebind_subscriptions
+            return storage
 
         configurator.register(Transport, register_transport)
         configurator.register(SubscriptionStorage, register_subscription_configuration)
 
         startup_hooks = [
             lambda config: AsyncCallable(config.get(Transport)),
+            lambda config: AsyncCallable(config.get(SubscriptionStorage).connect),
         ]
         shutdown_hooks = [
+            lambda config: AsyncCallable(config.get(SubscriptionStorage).close),
             lambda config: AsyncCallable(config.get(Transport).close),
         ]
         plugin = LifespanHooksRegistrationPluginConfig(

@@ -70,4 +70,11 @@ Key ``RabbitMQPluginConfig`` fields:
     input queue, the second for any other queue this transport declares (e.g. via
     ``create_queue``). Both default to a durable, non-exclusive, non-auto-delete queue.
 
-If for any reason, you don't want to use the plugin, the transport can be configured separately by providing an instance of :py:class:`~mersal_rabbitmq.transport.RabbitMqTransport` to the `transport` argument in the Mersal app constructor. Similarly, an instance of :py:class:`~mersal_rabbitmq.subscription_storage.RabbitMqSubscriptionStorage` can be given to the `subscription_config` argument.
+If for any reason, you don't want to use the plugin, the transport can be
+configured separately by providing an instance of
+:py:class:`~mersal_rabbitmq.transport.RabbitMqTransport` to the `transport`
+argument in the Mersal app constructor. Similarly, an instance of
+:py:class:`~mersal_rabbitmq.subscription_storage.RabbitMqSubscriptionStorage`
+can be given to the `subscription_config` argument. This is not recommended
+because the plugin has some setup where the connection is shared between the
+transport and the subscription storage in addition to other features.
