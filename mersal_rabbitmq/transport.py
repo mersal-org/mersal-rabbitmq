@@ -302,7 +302,7 @@ class RabbitMqTransport(BaseTransport):
 
         async with anyio.create_task_group() as task_group:
             for message in outgoing_message:
-                task_group.start_soon(_publish, message)
+                _ = task_group.start_soon(_publish, message)
 
     async def receive(self, transaction_context: TransactionContext) -> TransportMessage | None:
         """Wait for the next message; blocks until one arrives."""
