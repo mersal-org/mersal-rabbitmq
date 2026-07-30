@@ -51,4 +51,4 @@ Mersal-RabbitMQ
 Acknowledgments
 -----------------
 
-Thanks to all contributors in `Rebus-RabbitMQ <https://github.com/rebus-org/rebus-rabbitmq>`_. Many ideas were copied from there. Thanks also goes to `aio-pika <https://docs.aio-pika.dev/>`_ for providing an async client library for Rabbitmq.
+Thanks to all contributors in `Rebus-RabbitMQ <https://github.com/rebus-org/Rebus.RabbitMq>`_. Many ideas were copied from there. Thanks also goes to `aio-pika <https://docs.aio-pika.dev/>`_ for providing an async client library for Rabbitmq.
