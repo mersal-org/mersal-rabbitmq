@@ -24,11 +24,11 @@ jobs:
       attestations: write # necessary for GitHub build provenance attestations
       id-token: write # necessary for GitHub build provenance attestations
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # hatch-vcs needs the full history/tags to compute the version
 
-      - uses: hynek/build-and-inspect-python-package@v2
+      - uses: hynek/build-and-inspect-python-package@v2.18.0
         env:
           # On a real release, stamp the exact version we're about to publish
           # without the tag existing yet -- hatch-vcs (via setuptools_scm)
@@ -50,7 +50,7 @@ jobs:
       id-token: write # necessary for trusted publishing
     steps:
       - name: Download packages built by build-and-inspect-python-package
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: Packages
           path: dist
@@ -71,7 +71,7 @@ jobs:
       id-token: write # necessary for trusted publishing
     steps:
       - name: Download packages built by build-and-inspect-python-package
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: Packages
           path: dist
@@ -92,7 +92,7 @@ jobs:
     permissions:
       contents: write # necessary to push the tag and create the release
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history so --generate-notes can find the previous tag
 
