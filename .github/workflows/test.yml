@@ -73,12 +73,12 @@ jobs:
         if: ${{ !inputs.coverage }}
         run: mise run test
 
-      # - name: Test with coverage
-      #   if: ${{ inputs.coverage }}
-      #   run: uv run pytest tests
+      - name: Test with coverage
+        if: ${{ inputs.coverage }}
+        run: mise run test-with-coverage
 
-      # - uses: actions/upload-artifact@v4
-      #   if: ${{ inputs.coverage }}
-      #   with:
-      #     name: coverage-xml
-      #     path: coverage.xml
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.coverage }}
+        with:
+          name: coverage-xml
+          path: coverage.xml
