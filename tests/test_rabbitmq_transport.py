@@ -236,7 +236,8 @@ class TestRabbitMQTransportSpecificBehaviour:
         await receiver()
 
         assert receiver._state is not None
-        await receiver._state.consumer.iterator.close()
+        assert receiver._state.receive is not None
+        await receiver._state.receive.consumer.iterator.close()
 
         message = TransportMessageBuilder.build()
 

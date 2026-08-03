@@ -71,6 +71,11 @@ class QueueDeclarationOptions:
 class RabbitMqTransportConfig:
     connection_uri: str
     input_queue_name: str
+    send_only: bool = False
+    """Set by `RabbitMQPlugin` from the owning app's `send_only` configuration - a
+    send-only app never receives, so this transport skips declaring/binding its own
+    input queue and never opens a consume channel or consumer for it.
+    """
     should_declare_exchanges: bool = True
     should_declare_input_queue: bool = True
     should_bind_input_queue: bool = True
@@ -119,6 +124,20 @@ class _Consumer:
 
 
 @dataclass
+class _ReceiveState:
+    """Everything that only exists for consuming from this app's own input queue.
+
+    `None` on `_StartedState` for a send-only transport, which never declares/binds
+    its own input queue or consumes from it.
+    """
+
+    consume_channel: aio_pika.abc.AbstractChannel
+    input_queue: aio_pika.abc.AbstractQueue
+    consumer: _Consumer
+    pump_task_group: anyio.abc.TaskGroup
+
+
+@dataclass
 class _StartedState:
     """Everything that only exists once the transport has connected.
 
@@ -127,13 +146,10 @@ class _StartedState:
 
     connection: aio_pika.abc.AbstractRobustConnection
     publish_channel: aio_pika.abc.AbstractChannel
-    consume_channel: aio_pika.abc.AbstractChannel
     direct_exchange: aio_pika.abc.AbstractExchange
     topic_exchange: aio_pika.abc.AbstractExchange
-    input_queue: aio_pika.abc.AbstractQueue
-    consumer: _Consumer
-    pump_task_group: anyio.abc.TaskGroup
     pump_exit_stack: AsyncExitStack
+    receive: _ReceiveState | None
 
 
 class RabbitMqTransport(BaseTransport):
@@ -180,6 +196,11 @@ class RabbitMqTransport(BaseTransport):
         queue only restores its direct-exchange binding; the `queue_recreated_hook`
         property lets a subscription storage re-establish topic-exchange bindings too
         (see `RabbitMQPlugin`).
+
+    Send-only apps:
+        See `RabbitMqTransportConfig.send_only`: this app's own input queue is only
+        ever declared, bound, and consumed from when it isn't send-only, since a
+        send-only app never receives.
     """
 
     def __init__(
@@ -193,6 +214,7 @@ class RabbitMqTransport(BaseTransport):
         self._logger = logger or NullLogger()
 
         self._connection_uri = config.connection_uri
+        self._send_only = config.send_only
 
         self._direct_exchange_name = config.direct_exchange_name
         self._topic_exchange_name = config.topic_exchange_name
@@ -223,7 +245,7 @@ class RabbitMqTransport(BaseTransport):
                 self._check_input_queue_exists,
                 config.passive_queue_check_interval,
             )
-            if config.passive_queue_check_interval is not None
+            if config.passive_queue_check_interval is not None and not self._send_only
             else None
         )
 
@@ -278,8 +300,9 @@ class RabbitMqTransport(BaseTransport):
         self._state = None
         self._exchange_cache.clear()
         if state is not None:
-            await self._close_consumer(state.consumer)
-            state.pump_task_group.cancel_scope.cancel()
+            if state.receive is not None:
+                await self._close_consumer(state.receive.consumer)
+                state.receive.pump_task_group.cancel_scope.cancel()
             await state.pump_exit_stack.aclose()
             await state.connection.close()
 
@@ -307,7 +330,9 @@ class RabbitMqTransport(BaseTransport):
     async def receive(self, transaction_context: TransactionContext) -> TransportMessage | None:
         """Wait for the next message; blocks until one arrives."""
         state = await self._ensure_started()
-        consumer = state.consumer
+        if state.receive is None:
+            raise RuntimeError("This transport is send-only; it has no input queue to receive from.")
+        consumer = state.receive.consumer
 
         try:
             incoming_message = await consumer.receive_stream.receive()
@@ -321,10 +346,12 @@ class RabbitMqTransport(BaseTransport):
             # Guarded so that concurrent receives (or the passive queue check) don't
             # each spin up their own replacement consumer for the same death.
             async with self._consumer_lock:
-                if self._state is state and state.consumer is consumer:
+                if self._state is state and state.receive.consumer is consumer:
                     self._logger.warning("rabbitmq.consumer.reinitializing", address=self.address)
                     await self._close_consumer(consumer)
-                    state.consumer = await self._create_consumer(state.input_queue, state.pump_task_group)
+                    state.receive.consumer = await self._create_consumer(
+                        state.receive.input_queue, state.receive.pump_task_group
+                    )
             return None
 
         # A message delivered before a connection drop is bound to that dead
@@ -417,18 +444,29 @@ class RabbitMqTransport(BaseTransport):
             connection = await aio_pika.connect_robust(self._connection_uri)
             pump_exit_stack = AsyncExitStack()
             try:
-                await self._declare_and_bind(connection, self.address)
+                if self._send_only:
+                    await self._declare_exchanges_only(connection)
+                else:
+                    await self._declare_and_bind(connection, self.address)
 
                 publish_channel = await connection.channel(publisher_confirms=True, on_return_raises=True)
                 direct_exchange = await publish_channel.get_exchange(self._direct_exchange_name, ensure=False)
                 topic_exchange = await publish_channel.get_exchange(self._topic_exchange_name, ensure=False)
 
-                consume_channel = await connection.channel()
-                await consume_channel.set_qos(prefetch_count=self._prefetch_count)
-                input_queue = await consume_channel.get_queue(self.address, ensure=True)
+                receive_state: _ReceiveState | None = None
+                if not self._send_only:
+                    consume_channel = await connection.channel()
+                    await consume_channel.set_qos(prefetch_count=self._prefetch_count)
+                    input_queue = await consume_channel.get_queue(self.address, ensure=True)
 
-                pump_task_group = await pump_exit_stack.enter_async_context(anyio.create_task_group())
-                consumer = await self._create_consumer(input_queue, pump_task_group)
+                    pump_task_group = await pump_exit_stack.enter_async_context(anyio.create_task_group())
+                    consumer = await self._create_consumer(input_queue, pump_task_group)
+                    receive_state = _ReceiveState(
+                        consume_channel=consume_channel,
+                        input_queue=input_queue,
+                        consumer=consumer,
+                        pump_task_group=pump_task_group,
+                    )
             except BaseException:
                 # A partial start (e.g. a PRECONDITION_FAILED on redeclare) must not
                 # leak the connection or the pump task group; shielded so cancellation
@@ -444,13 +482,10 @@ class RabbitMqTransport(BaseTransport):
             self._state = _StartedState(
                 connection=connection,
                 publish_channel=publish_channel,
-                consume_channel=consume_channel,
                 direct_exchange=direct_exchange,
                 topic_exchange=topic_exchange,
-                input_queue=input_queue,
-                consumer=consumer,
-                pump_task_group=pump_task_group,
                 pump_exit_stack=pump_exit_stack,
+                receive=receive_state,
             )
             return self._state
 
@@ -463,7 +498,7 @@ class RabbitMqTransport(BaseTransport):
         just checking.
         """
         state = self._state
-        if state is None:
+        if state is None or state.receive is None:
             return
         channel = await state.connection.channel()
         try:
@@ -475,11 +510,24 @@ class RabbitMqTransport(BaseTransport):
                 await self._on_queue_recreated(self.address)
             async with self._consumer_lock:
                 if self._state is state:
-                    await self._close_consumer(state.consumer)
-                    state.consumer = await self._create_consumer(state.input_queue, state.pump_task_group)
+                    await self._close_consumer(state.receive.consumer)
+                    state.receive.consumer = await self._create_consumer(
+                        state.receive.input_queue, state.receive.pump_task_group
+                    )
         finally:
             if not channel.is_closed:
                 await channel.close()
+
+    async def _declare_exchanges_only(self, connection: aio_pika.abc.AbstractRobustConnection) -> None:
+        """Declare the exchanges without touching an input queue - used by
+        `_ensure_started` for a send-only transport, which never declares/binds one
+        for itself.
+        """
+        if not self._should_declare_exchanges:
+            return
+        channel = await connection.channel()
+        async with channel:
+            await self._declare_exchanges(channel)
 
     async def _declare_and_bind(self, connection: aio_pika.abc.AbstractRobustConnection, address: str) -> None:
         if not any((self._should_declare_exchanges, self._should_declare_input_queue, self._should_bind_input_queue)):

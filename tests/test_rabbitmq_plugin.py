@@ -99,3 +99,73 @@ class TestRabbitMQPlugin:
         finally:
             await app.stop()
             await delete_queues(queue_name)
+
+    async def test_send_only_app_can_send_to_a_receiving_app(
+        self,
+        connection_uri: str,
+        topic_exchange_name: str,
+        delete_queues: Callable[..., Awaitable[None]],
+    ) -> None:
+        """A send-only app (`Mersal(..., send_only=True)`) still gets a working
+        transport wired up by `RabbitMQPlugin`, proving `configurator.send_only`
+        reaches `RabbitMqTransportConfig`.
+        """
+        received: list[Greeting] = []
+        done = anyio.Event()
+
+        receiver_activator = BuiltinHandlerActivator()
+
+        def handler_factory(message_context: Any, app: Mersal) -> Callable[[Greeting], Awaitable[None]]:
+            async def handler(message: Greeting) -> None:
+                received.append(message)
+                done.set()
+
+            return handler
+
+        receiver_activator.register(Greeting, handler_factory)
+
+        receiver_queue_name = f"plugin-test-receiver-{uuid.uuid4()}"
+        sender_queue_name = f"plugin-test-sender-{uuid.uuid4()}"
+
+        receiver = Mersal(
+            "plugin-test-receiver",
+            receiver_activator,
+            plugins=[
+                RabbitMQPluginConfig(
+                    connection_uri=connection_uri,
+                    input_queue_name=receiver_queue_name,
+                    topic_exchange_name=topic_exchange_name,
+                ).plugin()
+            ],
+            serializer=_JsonSerializer(types={Greeting}),
+        )
+        sender = Mersal(
+            "plugin-test-sender",
+            BuiltinHandlerActivator(),
+            plugins=[
+                RabbitMQPluginConfig(
+                    connection_uri=connection_uri,
+                    input_queue_name=sender_queue_name,
+                    topic_exchange_name=topic_exchange_name,
+                ).plugin()
+            ],
+            serializer=_JsonSerializer(types={Greeting}),
+            send_only=True,
+        )
+
+        try:
+            await receiver.start()
+            await sender.start()
+
+            assert sender.worker is None
+
+            await sender.send(Greeting(text="hello"), addresses={receiver_queue_name})
+
+            with anyio.fail_after(5.0):
+                await done.wait()
+
+            assert received == [Greeting(text="hello")]
+        finally:
+            await sender.stop()
+            await receiver.stop()
+            await delete_queues(receiver_queue_name)

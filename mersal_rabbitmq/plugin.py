@@ -71,6 +71,7 @@ class RabbitMQPlugin(Plugin):
             transport_config = RabbitMqTransportConfig(
                 connection_uri=self._config.connection_uri,
                 input_queue_name=self._config.input_queue_name,
+                send_only=configurator.send_only,
                 should_declare_exchanges=self._config.should_declare_exchanges,
                 should_declare_input_queue=self._config.should_declare_input_queue,
                 should_bind_input_queue=self._config.should_bind_input_queue,
