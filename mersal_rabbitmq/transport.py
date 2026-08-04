@@ -5,7 +5,6 @@ from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -35,28 +34,6 @@ __all__ = (
 
 
 _RETRY_DELAYS = [0.1, 0.5, 2.0]
-
-# Types pamqp encodes natively into an AMQP field table. Everything else is
-# stringified as a last resort (see `_to_header_value`).
-_NATIVE_HEADER_TYPES = (bool, int, float, str, bytes, datetime, Decimal)
-
-
-def _to_header_value(value: Any) -> Any:
-    """Coerce a header value into something pamqp can encode into an AMQP field table.
-
-    AMQP field tables natively carry bools, ints, floats, strings, bytes, timestamps,
-    decimals, and nested lists/tables, so those pass through unchanged - stringifying
-    them would mean e.g. an int header sent through RabbitMQ comes back as a str,
-    unlike the same message sent through any other transport. Only values pamqp has no
-    encoding for (e.g. UUID) fall back to `str`.
-    """
-    if value is None or isinstance(value, _NATIVE_HEADER_TYPES):
-        return value
-    if isinstance(value, dict):
-        return {str(key): _to_header_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_to_header_value(item) for item in value]
-    return str(value)
 
 
 @dataclass
@@ -615,7 +592,7 @@ class RabbitMqTransport(BaseTransport):
         correlation_id = headers.correlation_id
         return aio_pika.Message(
             body=transport_message.body,
-            headers={key: _to_header_value(value) for key, value in headers.items()},
+            headers=dict(headers),
             delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             message_id=str(message_id) if message_id is not None else None,
             correlation_id=str(correlation_id) if correlation_id is not None else None,
