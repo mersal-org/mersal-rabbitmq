@@ -79,7 +79,7 @@ log_cli = true
 
 [tool.ruff]
 include = [
-  "mersal_rabbitmq/**/*.{py,pyi}",
+  "src/mersal_rabbitmq/**/*.{py,pyi}",
   "tests/**/*.{py,pyi}",
   "docs/examples/**/*.{py,pyi}",
   "pyproject.toml"
@@ -88,7 +88,7 @@ target-version = "py311"
 line-length = 120
 
 src = [
-  "mersal_rabbitmq",
+  "src",
 ]
 
 [tool.ruff.format]
@@ -130,7 +130,7 @@ fallback-version = "0.0.0"
 local_scheme = "no-local-version"
 
 [tool.hatch.build.targets.wheel]
-packages = ["mersal_rabbitmq"]
+packages = ["src/mersal_rabbitmq"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -163,7 +163,7 @@ warn_unreachable = true
 typeCheckingMode = "standard"
 pythonVersion = "3.11"
 include = [
-  "mersal_rabbitmq",
+  "src/mersal_rabbitmq",
   "tests",
 ]
 
@@ -172,5 +172,5 @@ python-version = "3.11"
 
 [tool.ty.src]
 include = [
-  "mersal_rabbitmq",
+  "src/mersal_rabbitmq",
 ]
