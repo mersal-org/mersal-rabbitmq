@@ -19,12 +19,12 @@ Otherwise,
 Configuring the transport & pub/sub
 -------------------------------------
 
-Use the plugin :py:class:`~mersal_rabbitmq.plugin.RabbitMQPlugin`, to configure both the transport and pub/sub:
+Use the plugin :py:class:`~mersal.rabbitmq.plugin.RabbitMQPlugin`, to configure both the transport and pub/sub:
 
 .. code-block:: python
 
-    from mersal.app import Mersal
-    from mersal_rabbitmq.plugin import RabbitMQPluginConfig
+    from mersal.core.app import Mersal
+    from mersal.rabbitmq.plugin import RabbitMQPluginConfig
 
     rabbitmq_plugin_config = RabbitMQPluginConfig(
         connection_uri="amqp://guest:guest@localhost:5672",
@@ -61,20 +61,20 @@ Key ``RabbitMQPluginConfig`` fields:
 
 ``direct_exchange_name`` / ``topic_exchange_name`` (default ``"mersal.direct"`` / ``"mersal.topics"``)
     Names of the two exchanges the transport declares and uses. If you're also using
-    :py:class:`~mersal_rabbitmq.subscription_storage.RabbitMqSubscriptionStorage`,
+    :py:class:`~mersal.rabbitmq.subscription_storage.RabbitMqSubscriptionStorage`,
     its ``topic_exchange_name`` must match this one.
 
 ``input_queue_declaration_options`` / ``default_queue_declaration_options``
-    :py:class:`~mersal_rabbitmq.transport.QueueDeclarationOptions` controlling
+    :py:class:`~mersal.rabbitmq.transport.QueueDeclarationOptions` controlling
     durability/exclusivity/auto-delete/arguments - the first for this transport's own
     input queue, the second for any other queue this transport declares (e.g. via
     ``create_queue``). Both default to a durable, non-exclusive, non-auto-delete queue.
 
 If for any reason, you don't want to use the plugin, the transport can be
 configured separately by providing an instance of
-:py:class:`~mersal_rabbitmq.transport.RabbitMqTransport` to the `transport`
+:py:class:`~mersal.rabbitmq.transport.RabbitMqTransport` to the `transport`
 argument in the Mersal app constructor. Similarly, an instance of
-:py:class:`~mersal_rabbitmq.subscription_storage.RabbitMqSubscriptionStorage`
+:py:class:`~mersal.rabbitmq.subscription_storage.RabbitMqSubscriptionStorage`
 can be given to the `subscription_config` argument. This is not recommended
 because the plugin has some setup where the connection is shared between the
 transport and the subscription storage in addition to other features.

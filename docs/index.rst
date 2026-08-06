@@ -1,7 +1,7 @@
 Welcome to Mersal RabbitMQ's documentation!
 ============================================
 
-**mersal_rabbitmq** is the RabbitMQ implementation for Mersal. It allows using RabbitMQ as a transport that also supports Mersal pub/sub.
+**mersal.rabbitmq** is the RabbitMQ implementation for Mersal. It allows using RabbitMQ as a transport that also supports Mersal pub/sub.
 
 
 Quickstart
@@ -13,8 +13,8 @@ Quickstart
 
 .. code-block:: python
 
-    from mersal.app import Mersal
-    from mersal_rabbitmq.plugin import RabbitMQPluginConfig
+    from mersal.core.app import Mersal
+    from mersal.rabbitmq.plugin import RabbitMQPluginConfig
 
     rabbitmq_plugin_config = RabbitMQPluginConfig(
         connection_uri="amqp://guest:guest@localhost:5672",

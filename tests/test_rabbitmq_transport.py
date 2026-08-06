@@ -7,12 +7,12 @@ import anyio
 import pytest
 
 from mersal.logging import NullLogger
+from mersal.rabbitmq.transport import RabbitMqTransport, RabbitMqTransportConfig
+from mersal.testing.core.test_doubles import TransportMessageBuilder
+from mersal.testing.core.testing_utils import is_docker_available
+from mersal.testing.core.transport.basic_transport_tests import BasicTransportTest, TransportMaker
 from mersal.transport import DefaultTransactionContext
 from mersal.types.callable_types import AsyncAnyCallable
-from mersal_rabbitmq.transport import RabbitMqTransport, RabbitMqTransportConfig
-from mersal_testing.test_doubles import TransportMessageBuilder
-from mersal_testing.testing_utils import is_docker_available
-from mersal_testing.transport.basic_transport_tests import BasicTransportTest, TransportMaker
 
 __all__ = (
     "TestRabbitMQTransport",
@@ -64,7 +64,7 @@ class TestRabbitMQTransport:
 
 
 class TestRabbitMQTransportContract(BasicTransportTest):
-    """Runs mersal_testing's generic transport contract against `RabbitMqTransport`."""
+    """Runs mersal.testing.core's generic transport contract against `RabbitMqTransport`."""
 
     @pytest.fixture
     def transport_maker(self, rabbitmq_transport_maker: TransportMaker) -> TransportMaker:

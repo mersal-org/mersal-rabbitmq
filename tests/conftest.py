@@ -14,11 +14,11 @@ import pytest
 from aiormq import AMQPConnectionError
 
 from mersal.logging import NullLogger
+from mersal.rabbitmq.transport import RabbitMqTransport, RabbitMqTransportConfig
+from mersal.testing.core._internal.conftest import *
+from mersal.testing.core.transport.basic_transport_tests import TransportMaker
 from mersal.transport import Transport
 from mersal.utils import AsyncCallable
-from mersal_rabbitmq.transport import RabbitMqTransport, RabbitMqTransportConfig
-from mersal_testing._internal.conftest import *
-from mersal_testing.transport.basic_transport_tests import TransportMaker
 
 __all__ = (
     "DockerServiceRegistry",

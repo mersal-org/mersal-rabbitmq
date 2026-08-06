@@ -8,9 +8,9 @@ import anyio
 import pytest
 
 from mersal.activation import BuiltinHandlerActivator
-from mersal.app import Mersal
-from mersal_rabbitmq.plugin import RabbitMQPluginConfig
-from mersal_testing.testing_utils import is_docker_available
+from mersal.core.app import Mersal
+from mersal.rabbitmq.plugin import RabbitMQPluginConfig
+from mersal.testing.core.testing_utils import is_docker_available
 
 __all__ = ("TestRabbitMQPlugin",)
 

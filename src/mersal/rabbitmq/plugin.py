@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING, cast
 from mersal.lifespan.lifespan_hooks_registration_plugin import LifespanHooksRegistrationPluginConfig
 from mersal.logging import Logger
 from mersal.plugins import Plugin
+from mersal.rabbitmq.subscription_storage import RabbitMqSubscriptionStorage, RabbitMqSubscriptionStorageConfig
+from mersal.rabbitmq.transport import QueueDeclarationOptions, RabbitMqTransport, RabbitMqTransportConfig
 from mersal.subscription import SubscriptionStorage
 from mersal.threading import AnyIOPeriodicTaskFactory
 from mersal.transport.transport import Transport
 from mersal.utils.sync import AsyncCallable
-from mersal_rabbitmq.subscription_storage import RabbitMqSubscriptionStorage, RabbitMqSubscriptionStorageConfig
-from mersal_rabbitmq.transport import QueueDeclarationOptions, RabbitMqTransport, RabbitMqTransportConfig
 
 if TYPE_CHECKING:
     from pamqp import common as pamqp_common

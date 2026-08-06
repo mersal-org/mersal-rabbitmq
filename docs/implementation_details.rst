@@ -30,8 +30,8 @@ Mersal integration
 
 The library provides an implementation for Mersal two main protocols:
 
-- :py:class:`mersal.transport.Transport`, via :py:class:`~mersal_rabbitmq.transport.RabbitMqTransport`
-- :py:class:`mersal.subscription.SubscriptionStorage`, via :py:class:`~mersal_rabbitmq.subscription_storage.RabbitMqSubscriptionStorage`
+- :py:class:`mersal.transport.Transport`, via :py:class:`~mersal.rabbitmq.transport.RabbitMqTransport`
+- :py:class:`mersal.subscription.SubscriptionStorage`, via :py:class:`~mersal.rabbitmq.subscription_storage.RabbitMqSubscriptionStorage`
 
 Push-Pull bridge
 -------------------

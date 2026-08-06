@@ -136,7 +136,7 @@ class RabbitMqTransport(BaseTransport):
         Two durable exchanges are declared: a ``direct`` exchange used for
         point-to-point sends (each app's input queue is bound to it with a routing key
         equal to its own address), and a ``topic`` exchange used for pub/sub (see
-        `mersal_rabbitmq.subscription_storage.RabbitMqSubscriptionStorage`).
+        `mersal.rabbitmq.subscription_storage.RabbitMqSubscriptionStorage`).
 
     Backend:
         Anyio-native, including the consumer pump: `_pump` runs in a long-lived task
@@ -564,7 +564,7 @@ class RabbitMqTransport(BaseTransport):
         vanishing silently.
 
         An address of the form ``"topic@exchange"`` - as produced by
-        `mersal_rabbitmq.subscription_storage.RabbitMqSubscriptionStorage` for pub/sub -
+        `mersal.rabbitmq.subscription_storage.RabbitMqSubscriptionStorage` for pub/sub -
         is published to the named exchange with the topic as the routing key, and is
         *not* mandatory: publishing an event nobody has subscribed to yet is normal,
         not an error.

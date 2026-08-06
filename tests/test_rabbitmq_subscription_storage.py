@@ -5,16 +5,16 @@ from typing import Any, cast
 import aio_pika
 import pytest
 
-from mersal.subscription import SubscriptionStorage
-from mersal_rabbitmq.subscription_storage import (
+from mersal.rabbitmq.subscription_storage import (
     RabbitMqSubscriptionStorage,
     RabbitMqSubscriptionStorageConfig,
 )
-from mersal_testing.subscription.basic_subscription_storage_tests import (
+from mersal.subscription import SubscriptionStorage
+from mersal.testing.core.subscription.basic_subscription_storage_tests import (
     BasicSubscriptionStorageTest,
     SubscriptionStorageMaker,
 )
-from mersal_testing.testing_utils import is_docker_available
+from mersal.testing.core.testing_utils import is_docker_available
 
 __all__ = ("TestRabbitMQSubscriptionStorage",)
 
