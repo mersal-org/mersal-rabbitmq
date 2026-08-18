@@ -12,6 +12,7 @@ import aio_pika
 import aio_pika.abc
 import anyio
 import anyio.abc
+import anyio.lowlevel
 
 from mersal.logging import Logger, NullLogger
 from mersal.messages import TransportMessage
@@ -86,6 +87,15 @@ class RabbitMqTransportConfig:
     dead *consumer*, not a vanished queue) because a queue nobody is currently
     consuming from or publishing to wouldn't otherwise be noticed missing until
     something tried to use it again. Set to `None` to disable the check entirely.
+    """
+    receive_timeout: float = 5.0
+    """Maximum seconds `receive` waits for a message before returning `None`.
+
+    `Transport.receive` must return within a bounded time rather than blocking
+    forever, so the worker's heartbeat keeps advancing while idle - an
+    unbounded wait here would make a merely-idle transport indistinguishable
+    from a wedged one to the liveness watcher. Idle backoff between calls is
+    the worker's job, not this transport's.
     """
 
 
@@ -214,6 +224,7 @@ class RabbitMqTransport(BaseTransport):
         self._direct_exchange_arguments = config.direct_exchange_arguments or {}
         self._topic_exchange_arguments = config.topic_exchange_arguments or {}
         self._prefetch_count = config.prefetch_count
+        self._receive_timeout = config.receive_timeout
 
         periodic_task_factory = periodic_task_factory or AnyIOPeriodicTaskFactory(logger=self._logger)
         self._passive_queue_check_task: PeriodicAsyncTask | None = (
@@ -305,21 +316,43 @@ class RabbitMqTransport(BaseTransport):
                 _ = task_group.start_soon(_publish, message)
 
     async def receive(self, transaction_context: TransactionContext) -> TransportMessage | None:
-        """Wait for the next message; blocks until one arrives."""
+        """Return the next message, or `None` after `receive_timeout` seconds without one.
+
+        The bounded wait is purely local - the pump keeps the AMQP consumer running
+        regardless, so timing out touches neither the broker nor the consumer, and a
+        message arriving just after the deadline is simply picked up by the next call.
+        """
         state = await self._ensure_started()
         if state.receive is None:
             raise RuntimeError("This transport is send-only; it has no input queue to receive from.")
         consumer = state.receive.consumer
 
+        incoming_message: aio_pika.abc.AbstractIncomingMessage | None = None
+        end_of_stream = False
         try:
-            incoming_message = await consumer.receive_stream.receive()
+            # Checkpoint first so a busy stretch of buffered messages still yields to
+            # the event loop once per call, like a plain `receive()` would - and so a
+            # pending cancellation lands before a message is popped, not after.
+            await anyio.lowlevel.checkpoint()
+            incoming_message = consumer.receive_stream.receive_nowait()
+        except anyio.WouldBlock:
+            # Nothing buffered: wait, but only for so long. The timeout machinery is
+            # confined to this idle path on purpose - a queue that's being drained
+            # never pays for it, and cancellation can only ever race a delivery here.
+            with anyio.move_on_after(self._receive_timeout):
+                try:
+                    incoming_message = await consumer.receive_stream.receive()
+                except anyio.EndOfStream:
+                    end_of_stream = True
         except anyio.EndOfStream:
-            incoming_message = None
+            end_of_stream = True
 
-        if incoming_message is None:
+        if end_of_stream:
             # The consumer was torn down (e.g. the channel closed and wasn't - or
             # couldn't be - transparently recovered by aio_pika's robust machinery).
-            # Self-heal by re-establishing it.
+            # Self-heal by re-establishing it. Keyed on end-of-stream specifically -
+            # a timed-out wait also yields no message, but that consumer is healthy
+            # and must not be rebuilt.
             # Guarded so that concurrent receives (or the passive queue check) don't
             # each spin up their own replacement consumer for the same death.
             async with self._consumer_lock:
@@ -329,6 +362,11 @@ class RabbitMqTransport(BaseTransport):
                     state.receive.consumer = await self._create_consumer(
                         state.receive.input_queue, state.receive.pump_task_group
                     )
+            return None
+
+        if incoming_message is None:
+            # Idle timeout: bounded receive lets the worker's liveness heartbeat
+            # advance; the worker owns any backoff before calling again.
             return None
 
         # A message delivered before a connection drop is bound to that dead
