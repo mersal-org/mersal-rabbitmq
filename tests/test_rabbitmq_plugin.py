@@ -2,6 +2,7 @@ import json
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
+from datetime import timedelta
 from typing import Any
 
 import anyio
@@ -9,8 +10,10 @@ import pytest
 
 from mersal.activation import BuiltinHandlerActivator
 from mersal.core.app import Mersal
+from mersal.persistence.in_memory import InMemoryTimeoutManager
 from mersal.rabbitmq.plugin import RabbitMQPluginConfig
 from mersal.testing.core.testing_utils import is_docker_available
+from mersal.timeouts import TimeoutsConfig
 
 __all__ = ("TestRabbitMQPlugin",)
 
@@ -169,3 +172,102 @@ class TestRabbitMQPlugin:
             await sender.stop()
             await receiver.stop()
             await delete_queues(receiver_queue_name)
+
+    async def test_defer_local_is_delivered_after_the_delay(
+        self,
+        connection_uri: str,
+        topic_exchange_name: str,
+        delete_queues: Callable[..., Awaitable[None]],
+    ) -> None:
+        received_at: list[float] = []
+        done = anyio.Event()
+
+        activator = BuiltinHandlerActivator()
+
+        def handler_factory(message_context: Any, app: Mersal) -> Callable[[Greeting], Awaitable[None]]:
+            async def handler(message: Greeting) -> None:
+                received_at.append(anyio.current_time())
+                done.set()
+
+            return handler
+
+        activator.register(Greeting, handler_factory)
+
+        queue_name = f"plugin-defer-test-{uuid.uuid4()}"
+        app = Mersal(
+            "plugin-defer-test-app",
+            activator,
+            plugins=[
+                RabbitMQPluginConfig(
+                    connection_uri=connection_uri,
+                    input_queue_name=queue_name,
+                    topic_exchange_name=topic_exchange_name,
+                    delayed_exchange_name="mersal.delayed",
+                ).plugin()
+            ],
+            serializer=_JsonSerializer(types={Greeting}),
+        )
+
+        try:
+            await app.start()
+            sent_at = anyio.current_time()
+            await app.defer_local(timedelta(seconds=1.5), Greeting(text="later"))
+
+            with anyio.fail_after(10.0):
+                await done.wait()
+
+            assert received_at[0] - sent_at >= 1.4
+        finally:
+            await app.stop()
+            await delete_queues(queue_name)
+
+    async def test_defer_local_through_a_timeout_manager_without_a_delayed_exchange(
+        self,
+        connection_uri: str,
+        topic_exchange_name: str,
+        delete_queues: Callable[..., Awaitable[None]],
+    ) -> None:
+        done = anyio.Event()
+        activator = BuiltinHandlerActivator()
+
+        def handler_factory(message_context: Any, app: Mersal) -> Callable[[Greeting], Awaitable[None]]:
+            async def handler(message: Greeting) -> None:
+                done.set()
+
+            return handler
+
+        activator.register(Greeting, handler_factory)
+
+        queue_name = f"plugin-timeouts-test-{uuid.uuid4()}"
+        timeout_manager = InMemoryTimeoutManager()
+        app = Mersal(
+            "plugin-timeouts-test-app",
+            activator,
+            plugins=[
+                RabbitMQPluginConfig(
+                    connection_uri=connection_uri,
+                    input_queue_name=queue_name,
+                    topic_exchange_name=topic_exchange_name,
+                ).plugin()
+            ],
+            serializer=_JsonSerializer(types={Greeting}),
+            timeouts=TimeoutsConfig(storage=timeout_manager, poll_interval=0.1),
+        )
+
+        try:
+            await app.start()
+            await app.defer_local(timedelta(seconds=1), Greeting(text="later"))
+
+            with anyio.fail_after(5.0):
+                while not len(timeout_manager):
+                    await anyio.sleep(0.05)
+            assert not done.is_set()
+            with anyio.fail_after(10.0):
+                await done.wait()
+            # marked as completed only after the send, which can race the handler
+            with anyio.fail_after(5.0):
+                while len(timeout_manager):
+                    await anyio.sleep(0.05)
+        finally:
+            await app.stop()
+            await delete_queues(queue_name)

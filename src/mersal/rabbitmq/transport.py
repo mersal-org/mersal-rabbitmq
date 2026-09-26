@@ -4,9 +4,9 @@ import math
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import aio_pika
 import aio_pika.abc
@@ -14,6 +14,7 @@ import anyio
 import anyio.abc
 import anyio.lowlevel
 
+from mersal.exceptions import DeferralNotSupportedError
 from mersal.logging import Logger, NullLogger
 from mersal.messages import TransportMessage
 from mersal.messages.message_headers import MessageHeaders
@@ -35,6 +36,8 @@ __all__ = (
 
 
 _RETRY_DELAYS = [0.1, 0.5, 2.0]
+_MAX_DELAY_MS = 2**32 - 1
+"""Largest `x-delay` the delayed message exchange plugin accepts."""
 
 
 @dataclass
@@ -61,6 +64,20 @@ class RabbitMqTransportConfig:
     topic_exchange_arguments: pamqp_common.Arguments | None = None
     direct_exchange_name: str = "mersal.direct"
     topic_exchange_name: str = "mersal.topics"
+    delayed_exchange_name: str | None = None
+    """Name of the exchange used for deferred messages (e.g. ``"mersal.delayed"``).
+
+    Setting it enables native deferral (`Mersal.defer`/`defer_local`) through the
+    `rabbitmq_delayed_message_exchange` broker plugin, which must be enabled on the
+    broker. The exchange is declared (when `should_declare_exchanges`) as an
+    ``x-delayed-message`` exchange bound to the direct exchange, so a deferred
+    message is routed exactly like a plain send once its delay has elapsed. Use a
+    dedicated delayed exchange per direct exchange: every direct exchange bound to it
+    gets every deferred message.
+
+    Without it, deferred messages are sent as they are - to a timeout manager (see
+    `mersal.timeouts.TimeoutsConfig`), which holds them until due.
+    """
     input_queue_declaration_options: QueueDeclarationOptions | None = None
     default_queue_declaration_options: QueueDeclarationOptions | None = None
     prefetch_count: int = 50
@@ -205,6 +222,7 @@ class RabbitMqTransport(BaseTransport):
 
         self._direct_exchange_name = config.direct_exchange_name
         self._topic_exchange_name = config.topic_exchange_name
+        self._delayed_exchange_name = config.delayed_exchange_name
         self._input_queue_declaration_options = config.input_queue_declaration_options or QueueDeclarationOptions(
             durable=True,
             exclusive=False,
@@ -246,6 +264,10 @@ class RabbitMqTransport(BaseTransport):
 
     async def __call__(self) -> None:
         await self._ensure_started()
+
+    @property
+    def supports_deferral(self) -> bool:
+        return self._delayed_exchange_name is not None
 
     @property
     def queue_recreated_hook(self) -> Callable[[str], Awaitable[None]] | None:
@@ -307,8 +329,15 @@ class RabbitMqTransport(BaseTransport):
         state = await self._ensure_started()
 
         async def _publish(message: OutgoingMessage) -> None:
-            exchange, routing_key, mandatory = await self._resolve_publish_target(state, message.destination_address)
-            amqp_message = self._to_amqp_message(message.transport_message)
+            if self._delayed_exchange_name is not None and message.transport_message.headers.deferred_until:
+                exchange, routing_key, mandatory, amqp_message = await self._prepare_deferred_publish(
+                    state, self._delayed_exchange_name, message
+                )
+            else:
+                exchange, routing_key, mandatory = await self._resolve_publish_target(
+                    state, message.destination_address
+                )
+                amqp_message = self._to_amqp_message(message.transport_message)
             await self._retry(partial(exchange.publish, amqp_message, routing_key, mandatory=mandatory))
 
         async with anyio.create_task_group() as task_group:
@@ -576,6 +605,26 @@ class RabbitMqTransport(BaseTransport):
             durable=True,
             arguments=self._topic_exchange_arguments,
         )
+        if self._delayed_exchange_name is not None:
+            await self._declare_delayed_exchange(channel, self._delayed_exchange_name)
+
+    async def _declare_delayed_exchange(self, channel: aio_pika.abc.AbstractChannel, name: str) -> None:
+        """Declare the delayed exchange and bind the direct exchange to it.
+
+        Binding exchange-to-exchange (rather than binding each input queue) means a
+        deferred message reaches exactly the queues a plain send to the same address
+        would - including queues declared by other apps that know nothing about the
+        delayed exchange. The delayed exchange routes as a topic exchange so that a
+        single ``#`` binding forwards every routing key to the direct exchange.
+        """
+        delayed_exchange = await channel.declare_exchange(
+            name,
+            type="x-delayed-message",
+            durable=True,
+            arguments={"x-delayed-type": aio_pika.ExchangeType.TOPIC.value},
+        )
+        direct_exchange = await channel.get_exchange(self._direct_exchange_name, ensure=False)
+        await direct_exchange.bind(delayed_exchange, routing_key="#")
 
     async def _declare_queue(self, address: str, channel: aio_pika.abc.AbstractChannel) -> aio_pika.abc.AbstractQueue:
         options = (
@@ -614,6 +663,46 @@ class RabbitMqTransport(BaseTransport):
 
         return state.direct_exchange, destination_address, True
 
+    async def _prepare_deferred_publish(
+        self, state: _StartedState, delayed_exchange_name: str, message: OutgoingMessage
+    ) -> tuple[aio_pika.abc.AbstractExchange, str, bool, aio_pika.Message]:
+        """Prepare publishing a deferred message through the delayed exchange.
+
+        The `deferred_until`/`deferred_recipient` headers are replaced by
+        the plugin's ``x-delay`` header, so the delivered message looks like a plain
+        one - e.g. forwarding it to the error queue later doesn't defer it again.
+        They're removed from a copy: the same `TransportMessage` may be sent again
+        (e.g. retried by the outbox forwarder) and must still be deferred then.
+
+        The routing key is the destination address. The publish can't be mandatory:
+        the delayed exchange only routes the message once the delay has elapsed, so
+        the broker would report every such publish as unroutable.
+        """
+        transport_message = message.transport_message
+        headers = MessageHeaders(transport_message.headers)
+        deferred_until = headers.deferred_until
+        headers.pop(MessageHeaders.deferred_until_key, None)
+        headers.pop(MessageHeaders.deferred_recipient_key, None)
+        amqp_message = self._to_amqp_message(TransportMessage(transport_message.body, headers))
+
+        destination_address = message.destination_address
+        delay_ms = int((deferred_until - datetime.now(UTC)) / timedelta(milliseconds=1)) if deferred_until else 0
+        if delay_ms <= 0:
+            exchange, routing_key, mandatory = await self._resolve_publish_target(state, destination_address)
+            return exchange, routing_key, mandatory, amqp_message
+
+        if "@" in destination_address:
+            raise DeferralNotSupportedError(
+                detail=f"Only point-to-point addresses can be deferred, got {destination_address!r}"
+            )
+        if delay_ms > _MAX_DELAY_MS:
+            raise DeferralNotSupportedError(
+                detail=f"Can't defer by {delay_ms}ms; the delayed message exchange supports at most {_MAX_DELAY_MS}ms"
+            )
+        amqp_message.headers["x-delay"] = delay_ms
+        exchange = await self._get_exchange(state, delayed_exchange_name)
+        return exchange, destination_address, False, amqp_message
+
     async def _get_exchange(self, state: _StartedState, exchange_name: str) -> aio_pika.abc.AbstractExchange:
         if exchange_name == self._topic_exchange_name:
             return state.topic_exchange
@@ -630,7 +719,8 @@ class RabbitMqTransport(BaseTransport):
         correlation_id = headers.correlation_id
         return aio_pika.Message(
             body=transport_message.body,
-            headers=dict(headers),
+            # ty can't match the inferred values against pamqp's recursive FieldValue alias
+            headers=cast("aio_pika.abc.HeadersType", dict(headers)),
             delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             message_id=str(message_id) if message_id is not None else None,
             correlation_id=str(correlation_id) if correlation_id is not None else None,
@@ -644,4 +734,7 @@ class RabbitMqTransport(BaseTransport):
         )
 
     def _to_transport_message(self, message: aio_pika.abc.AbstractIncomingMessage) -> TransportMessage:
-        return TransportMessage(body=message.body, headers=MessageHeaders(message.headers or {}))
+        headers = dict(message.headers or {})
+        # set by the broker plugin on delayed deliveries; not part of Mersal's headers
+        headers.pop("x-delay", None)
+        return TransportMessage(body=message.body, headers=MessageHeaders(headers))

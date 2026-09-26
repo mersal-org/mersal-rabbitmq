@@ -35,6 +35,9 @@ class RabbitMQPluginConfig:
     topic_exchange_arguments: pamqp_common.Arguments | None = None
     direct_exchange_name: str = "mersal.direct"
     topic_exchange_name: str = "mersal.topics"
+    delayed_exchange_name: str | None = None
+    """Enables deferral through the broker's delayed message exchange plugin - see
+    `RabbitMqTransportConfig.delayed_exchange_name`."""
     input_queue_declaration_options: QueueDeclarationOptions | None = None
     default_queue_declaration_options: QueueDeclarationOptions | None = None
     prefetch_count: int = 50
@@ -79,6 +82,7 @@ class RabbitMQPlugin(Plugin):
                 topic_exchange_arguments=self._config.topic_exchange_arguments,
                 direct_exchange_name=self._config.direct_exchange_name,
                 topic_exchange_name=self._config.topic_exchange_name,
+                delayed_exchange_name=self._config.delayed_exchange_name,
                 input_queue_declaration_options=self._config.input_queue_declaration_options,
                 default_queue_declaration_options=self._config.default_queue_declaration_options,
                 prefetch_count=self._config.prefetch_count,

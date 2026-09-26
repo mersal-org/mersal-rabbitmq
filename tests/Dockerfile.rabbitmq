@@ -1,0 +1,5 @@
+# The broker used by the test suite, with the delayed message exchange plugin
+# enabled so deferral (`RabbitMqTransportConfig.delayed_exchange_name`) can be tested.
+FROM rabbitmq:4.0-management
+ADD --chmod=644 https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases/download/v4.0.7/rabbitmq_delayed_message_exchange-v4.0.7.ez /opt/rabbitmq/plugins/
+RUN rabbitmq-plugins enable --offline rabbitmq_delayed_message_exchange

@@ -1,9 +1,10 @@
-
 version: "3"
 
 services:
   rabbitmq:
-    image: rabbitmq:4.0-management
+    build:
+      context: .
+      dockerfile: Dockerfile.rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"

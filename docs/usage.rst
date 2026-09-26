@@ -64,6 +64,16 @@ Key ``RabbitMQPluginConfig`` fields:
     :py:class:`~mersal.rabbitmq.subscription_storage.RabbitMqSubscriptionStorage`,
     its ``topic_exchange_name`` must match this one.
 
+``delayed_exchange_name`` (default ``None``)
+    Enables deferred messages (``app.defer`` / ``app.defer_local``) using the
+    `delayed message exchange plugin <https://github.com/rabbitmq/rabbitmq-delayed-message-exchange>`_,
+    which must be enabled on the broker. When set (e.g. ``"mersal.delayed"``), an
+    ``x-delayed-message`` exchange with that name is declared and bound to the direct
+    exchange, so a deferred message reaches the same queue a plain send would once its
+    delay has elapsed. Only point-to-point addresses can be deferred, and the plugin
+    caps the delay at 2\ :sup:`32`-1 ms (about 49 days). Without it, deferring raises
+    :py:class:`~mersal.exceptions.DeferralNotSupportedError`.
+
 ``input_queue_declaration_options`` / ``default_queue_declaration_options``
     :py:class:`~mersal.rabbitmq.transport.QueueDeclarationOptions` controlling
     durability/exclusivity/auto-delete/arguments - the first for this transport's own
