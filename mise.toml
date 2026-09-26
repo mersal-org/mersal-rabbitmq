@@ -128,7 +128,7 @@ description = "Run tests with coverage"
 run = [
 '''
 echo "{{vars.INFO}} Running test cases... 🧪"
-uv run pytest tests --cov=mersal_rabbitmq --cov-report=xml
+uv run pytest tests --cov=mersal.rabbitmq --cov-report=xml
 echo "{{vars.OK}} Tests complete ✨"
 '''
 ]
