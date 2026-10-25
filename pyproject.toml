@@ -84,7 +84,6 @@ include = [
   "docs/examples/**/*.{py,pyi}",
   "pyproject.toml"
 ]
-target-version = "py311"
 line-length = 120
 
 src = [
@@ -165,9 +164,6 @@ include = [
   "src/mersal",
   "tests",
 ]
-
-[tool.ty.environment]
-python-version = "3.11"
 
 [tool.ty.src]
 include = [

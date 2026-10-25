@@ -6,7 +6,7 @@ from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import aio_pika
 import aio_pika.abc
@@ -719,8 +719,7 @@ class RabbitMqTransport(BaseTransport):
         correlation_id = headers.correlation_id
         return aio_pika.Message(
             body=transport_message.body,
-            # ty can't match the inferred values against pamqp's recursive FieldValue alias
-            headers=cast("aio_pika.abc.HeadersType", dict(headers)),
+            headers=dict(headers),
             delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             message_id=str(message_id) if message_id is not None else None,
             correlation_id=str(correlation_id) if correlation_id is not None else None,
